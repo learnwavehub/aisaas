@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import * as z from "zod";
@@ -8,6 +8,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { Controller, useForm } from "react-hook-form";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
+import { Download, Copy, Check } from "lucide-react";
 
 function svgDataUrl(text: string) {
   const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='720'><defs><linearGradient id='g' x1='0' x2='1'><stop offset='0' stop-color='#8b5cf6'/><stop offset='1' stop-color='#fb7185'/></linearGradient></defs><rect width='100%' height='100%' fill='url(#g)'/><text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' font-family='Arial' font-size='42' fill='white'>${text}</text></svg>`;
@@ -34,21 +35,115 @@ export default function ImagePage() {
       num_images: 1,
       size: "square_1_1",
     },
-    mode: "onChange", // Validate on change to update button state
+    mode: "onChange",
   });
 
   const [isLoading, setLoading] = useState(false);
   const [srcs, setSrcs] = useState<string[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const downloadCounterRef = useRef(0); // To avoid filename conflicts
 
   // Check if form is valid and ready for submission
   const isFormValid = form.formState.isValid;
   const isSubmitting = form.formState.isSubmitting;
 
+  // Utility function to download image - memoized to prevent recreating on each render
+  const downloadImage = useCallback((imageSrc: string, index: number) => {
+    const event = window.event as MouseEvent;
+    if (event) {
+      event.stopPropagation();
+      event.preventDefault();
+    }
+    
+    try {
+      // Create a unique filename
+      const promptText = form.getValues("prompt").slice(0, 30).replace(/[^a-z0-9]/gi, '_');
+      const timestamp = Date.now();
+      downloadCounterRef.current += 1;
+      const fileName = `ai-image-${promptText}-${index + 1}-${timestamp}-${downloadCounterRef.current}.png`;
+      
+      // If it's a data URL
+      if (imageSrc.startsWith('data:')) {
+        const response = fetch(imageSrc);
+        response.then(async (res) => {
+          const blob = await res.blob();
+          const url = window.URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = fileName;
+          link.style.display = 'none';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          window.URL.revokeObjectURL(url);
+        }).catch(error => {
+          console.error('Download failed:', error);
+          // Fallback method
+          const link = document.createElement('a');
+          link.href = imageSrc;
+          link.download = fileName;
+          link.style.display = 'none';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+        });
+      } else {
+        // For regular URLs
+        const link = document.createElement('a');
+        link.href = imageSrc;
+        link.download = fileName;
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
+    } catch (error) {
+      console.error('Download failed:', error);
+    }
+  }, [form]);
+
+  // Download all images
+  const downloadAllImages = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    event.preventDefault();
+    
+    srcs.forEach((src, index) => {
+      setTimeout(() => {
+        downloadImage(src, index);
+      }, index * 100); // Stagger downloads to avoid conflicts
+    });
+  }, [srcs, downloadImage]);
+
+  // Copy image to clipboard
+  const copyImageToClipboard = useCallback(async (imageSrc: string, index: number) => {
+    const event = window.event as MouseEvent;
+    if (event) {
+      event.stopPropagation();
+      event.preventDefault();
+    }
+    
+    try {
+      const response = await fetch(imageSrc);
+      const blob = await response.blob();
+      
+      // Create clipboard item
+      const item = new ClipboardItem({ 'image/png': blob });
+      await navigator.clipboard.write([item]);
+      
+      setCopiedIndex(index);
+      setTimeout(() => setCopiedIndex(null), 2000);
+    } catch (error) {
+      console.error('Copy failed:', error);
+      alert('Failed to copy image to clipboard. Please download instead.');
+    }
+  }, []);
+
   const onSubmit = async (data: FormSchema) => {
     setLoading(true);
     setSrcs([]);
     setErrorMessage(null);
+    setCopiedIndex(null);
     
     try {
       const res = await fetch("/api/freepik/images", {
@@ -87,14 +182,12 @@ export default function ImagePage() {
     } catch (e: any) {
       console.error("Generation error:", e);
       
-      // Check if it's a subscription error (from API response)
       if (e.message.includes("subscription") || e.message.includes("no subscription")) {
         setErrorMessage("You need a subscription to generate images. Redirecting to pricing...");
         setTimeout(() => {
           router.push("/pricing");
         }, 2000);
       } else {
-        // Error fallback: generate simple SVG preview
         const imgs: string[] = [];
         for (let i = 0; i < Math.min(4, data.num_images); i++) {
           imgs.push(
@@ -232,7 +325,6 @@ export default function ImagePage() {
                 />
               </div>
 
-              {/* Display form validation status */}
               <div className="mt-6 p-4 bg-indigo-50 rounded-lg">
                 <div className="flex justify-between items-center">
                   <h3 className="font-medium text-indigo-800">Form Status:</h3>
@@ -297,7 +389,6 @@ export default function ImagePage() {
                 </div>
               </div>
 
-              {/* Display error message */}
               {errorMessage && (
                 <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
                   <div className="flex items-center">
@@ -310,7 +401,6 @@ export default function ImagePage() {
                 </div>
               )}
 
-              {/* Display all form errors */}
               {Object.keys(form.formState.errors).length > 0 && (
                 <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
                   <h4 className="font-medium text-red-800 mb-2">Please fix the following errors:</h4>
@@ -324,8 +414,20 @@ export default function ImagePage() {
             </div>
 
             {/* Preview area */}
-            <div className="rounded-2xl overflow-hidden border bg-black/5 p-4 flex flex-col items-center justify-center">
-              <h3 className="text-lg font-medium mb-4">Generated Images</h3>
+            <div className="rounded-2xl overflow-hidden border bg-black/5 p-4 flex flex-col">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-medium">Generated Images</h3>
+                {srcs.length > 0 && (
+                  <button
+                    onClick={downloadAllImages}
+                    className="text-sm bg-indigo-100 hover:bg-indigo-200 text-indigo-700 px-3 py-1 rounded-full flex items-center gap-1 transition-colors"
+                  >
+                    <Download size={14} />
+                    Download All
+                  </button>
+                )}
+              </div>
+              
               {isLoading ? (
                 <div className="flex flex-col items-center justify-center h-64">
                   <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
@@ -334,17 +436,67 @@ export default function ImagePage() {
               ) : srcs.length > 0 ? (
                 <div className="grid grid-cols-1 gap-4 w-full">
                   {srcs.map((src, i) => (
-                    <div key={i} className="relative">
+                    <div key={i} className="relative group">
                       <img
                         src={src}
-                        alt={`generated-${i}`}
+                        alt={`Generated image ${i + 1}`}
                         className="rounded-lg shadow-xl w-full h-auto"
                       />
-                      <div className="absolute bottom-2 right-2 bg-black/70 text-white text-xs px-2 py-1 rounded">
+                      
+                      {/* Image overlay with download button */}
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200 rounded-lg">
+                        <div className="absolute bottom-3 left-3 right-3 flex gap-2">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              downloadImage(src, i);
+                            }}
+                            className="flex-1 bg-white hover:bg-gray-100 text-gray-800 py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+                            title="Download image"
+                          >
+                            <Download size={16} />
+                            Download
+                          </button>
+                          
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              copyImageToClipboard(src, i);
+                            }}
+                            className="flex-1 bg-white hover:bg-gray-100 text-gray-800 py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+                            title="Copy image to clipboard"
+                          >
+                            {copiedIndex === i ? (
+                              <>
+                                <Check size={16} className="text-green-600" />
+                                Copied!
+                              </>
+                            ) : (
+                              <>
+                                <Copy size={16} />
+                                Copy
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                      
+                      {/* Image number badge */}
+                      <div className="absolute top-2 right-2 bg-black/70 text-white text-xs px-2 py-1 rounded">
                         Image {i + 1}
                       </div>
                     </div>
                   ))}
+                  
+                  {/* Download info */}
+                  <div className="mt-4 p-3 bg-indigo-50 rounded-lg">
+                    <p className="text-sm text-indigo-700">
+                      <strong>Tip:</strong> Hover over images to see download options. 
+                      Images are PNG format with high resolution.
+                    </p>
+                  </div>
                 </div>
               ) : (
                 <div className="flex flex-col items-center justify-center h-64 text-center">
